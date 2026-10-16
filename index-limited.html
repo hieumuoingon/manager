@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quiz Tutor AI - Cấp mã kích hoạt</title>
+<style>
+  body{font:14px/1.5 sans-serif;max-width:760px;margin:16px auto;padding:0 12px}
+  fieldset{margin:0 0 14px}
+  label{display:block;margin:8px 0 2px}
+  input[type=text],input[type=password],input[type=number],textarea{width:100%;font:inherit;box-sizing:border-box}
+  textarea{font-family:monospace}
+  button{font:inherit;padding:6px 12px;margin:6px 6px 0 0}
+  small{display:block;color:#555}
+  .row{display:flex;gap:12px;flex-wrap:wrap}.row>div{flex:1;min-width:140px}
+  table{border-collapse:collapse;width:100%;font-size:13px}td,th{border:1px solid #999;padding:3px 6px;text-align:left}
+  .ok{color:#060}.err{color:#a00}
+  .note{background:#eef2ff;border:1px solid #c7d2fe;padding:8px 10px;border-radius:6px;margin-bottom:14px}
+</style>
+</head>
+<body>
+<h1>Cấp mã kích hoạt - Quiz Tutor AI</h1>
+<div class="note"><small>
+Trang này chạy hoàn toàn trong trình duyệt của bạn, không gửi dữ liệu đi đâu.
+Đây là bản quyền HẠN CHẾ: chỉ mở khóa bằng file khóa riêng đã được cấp sẵn để tạo/kiểm tra mã kích hoạt -
+<b>không thể tạo cặp khóa mới</b> và <b>không thể đóng gói extension</b>. Hai việc đó chỉ làm được ở trang quản trị đầy đủ.
+</small></div>
+
+<fieldset>
+  <legend>1. Mở khóa để tạo mã</legend>
+  <label for="keyFile">File khóa riêng (.json) - do quản trị viên cấp cho bạn</label>
+  <input id="keyFile" type="file" accept=".json,application/json">
+  <label for="unlockPass">Mật khẩu</label>
+  <input id="unlockPass" type="password" autocomplete="current-password">
+  <button id="unlockBtn" type="button">Mở khóa</button>
+  <div id="unlockMsg"></div>
+</fieldset>
+
+<fieldset id="makeBox">
+  <legend>2. Tạo mã kích hoạt</legend>
+  <div class="row">
+    <div><label for="labelInput">Người dùng (ghi chú cho admin)</label><input id="labelInput" type="text" placeholder="Nguyễn Văn A"></div>
+    <div><label for="devInput">Mã thiết bị (người dùng gửi cho bạn)</label><input id="devInput" type="text" placeholder="XXXX-XXXX-XXXX-XXXX"></div>
+  </div>
+  <label><input id="anyDev" type="checkbox"> Mã dùng được trên MỌI thiết bị (kém an toàn: có thể bị chuyền tay nhau)</label>
+  <div class="row">
+    <div><label for="daysInput">Số ngày sử dụng</label><input id="daysInput" type="number" min="1" max="120" value="30"></div>
+    <div><label for="rbInput">Phải nhập mã trong vòng (ngày)</label><input id="rbInput" type="number" min="0" max="120" value="14"></div>
+  </div>
+  <button id="makeBtn" type="button">Tạo mã</button>
+  <div id="makeMsg"></div>
+  <label for="codeOut">Mã kích hoạt</label>
+  <textarea id="codeOut" rows="4" readonly></textarea>
+  <button id="copyCode" type="button">Sao chép mã</button>
+</fieldset>
+
+<fieldset>
+  <legend>3. Kiểm tra một mã</legend>
+  <textarea id="chkIn" rows="3"></textarea>
+  <button id="chkBtn" type="button">Kiểm tra</button>
+  <div id="chkOut"></div>
+</fieldset>
+
+<fieldset>
+  <legend>4. Nhật ký mã đã tạo (chỉ lưu trong trình duyệt này)</legend>
+  <table id="logTable"><thead><tr><th>Thời điểm</th><th>Người dùng</th><th>Thiết bị</th><th>Ngày</th><th>Hạn nhập mã</th><th>ID mã</th></tr></thead><tbody></tbody></table>
+  <button id="csvBtn" type="button">Xuất CSV</button>
+  <button id="clearLog" type="button">Xóa nhật ký</button>
+</fieldset>
+
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const enc = new TextEncoder(), dec = new TextDecoder();
+  let privKey = null, pubJwk = null;
+
+  function b32enc(bytes) {
+    let bits = 0, val = 0, out = '';
+    for (const b of bytes) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } val &= (1 << bits) - 1; }
+    if (bits > 0) out += B32[(val << (5 - bits)) & 31];
+    return out;
+  }
+  function b32dec(str) {
+    const out = []; let bits = 0, val = 0;
+    for (const ch of str) { const i = B32.indexOf(ch); if (i < 0) throw new Error('Ký tự không hợp lệ'); val = (val << 5) | i; bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; val &= (1 << bits) - 1; } }
+    return new Uint8Array(out);
+  }
+  const hex = (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const b64 = (u8) => btoa(String.fromCharCode(...u8));
+  const unb64 = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  const normId = (s) => String(s || '').toUpperCase().replace(/[^A-Z2-7]/g, '');
+  function fmtDate(ms) { const d = new Date(ms); return String(d.getDate()).padStart(2, '0') + '/' + String(d.getMonth() + 1).padStart(2, '0') + '/' + d.getFullYear(); }
+  function fmtDateTime(ms) { const d = new Date(ms); return fmtDate(ms) + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }
+  const say = (id, msg, ok) => { const e = $(id); e.textContent = msg; e.className = ok ? 'ok' : 'err'; };
+  async function sha256(b) { return new Uint8Array(await crypto.subtle.digest('SHA-256', b)); }
+  async function deviceTag(id) { return (await sha256(enc.encode('QT-DEV:' + normId(id)))).slice(0, 6); }
+
+  async function pbkdf2Key(pass, salt, iter) {
+    const base = await crypto.subtle.importKey('raw', enc.encode(pass), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({ name: 'PBKDF2', salt, iterations: iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  }
+  function download(name, text) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  // ---- 2. Mở khóa ----
+  $('unlockBtn').addEventListener('click', async () => {
+    try {
+      const f = $('keyFile').files[0];
+      if (!f) return say('unlockMsg', 'Chưa chọn file khóa riêng.', false);
+      const file = JSON.parse(await f.text());
+      const aes = await pbkdf2Key($('unlockPass').value, unb64(file.salt), file.iter);
+      let plain;
+      try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(file.iv) }, aes, unb64(file.data)); } catch (_) { return say('unlockMsg', 'Sai mật khẩu hoặc file hỏng.', false); }
+      const jwk = JSON.parse(dec.decode(plain));
+      privKey = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+      pubJwk = file.pub;
+      $('unlockPass').value = '';
+      say('unlockMsg', 'Đã mở khóa (khóa chỉ nằm trong bộ nhớ của tab này).', true);
+    } catch (e) { say('unlockMsg', 'Lỗi: ' + e.message, false); }
+  });
+
+  // ---- 3. Tạo mã ----
+  // Cấu trúc: v(1) | id(6) | dev(6) | iat(4) | days(1) | redeemDays(1) | chữ ký(64)
+  $('makeBtn').addEventListener('click', async () => {
+    try {
+      if (!privKey) return say('makeMsg', 'Hãy mở khóa trước (bước 2).', false);
+      const any = $('anyDev').checked;
+      const devId = normId($('devInput').value);
+      if (!any && devId.length !== 16) return say('makeMsg', 'Mã thiết bị phải có 16 ký tự (dạng XXXX-XXXX-XXXX-XXXX).', false);
+      const days = parseInt($('daysInput').value, 10), rb = parseInt($('rbInput').value, 10);
+      if (!(days >= 1 && days <= 120)) return say('makeMsg', 'Số ngày phải từ 1 đến 120.', false);
+      if (!(rb >= 0 && rb <= 120)) return say('makeMsg', 'Hạn nhập mã phải từ 0 đến 120 ngày.', false);
+      const p = new Uint8Array(19);
+      p[0] = 1;
+      p.set(crypto.getRandomValues(new Uint8Array(6)), 1);
+      p.set(any ? new Uint8Array(6) : await deviceTag(devId), 7);
+      const iat = Math.floor(Date.now() / 1000);
+      new DataView(p.buffer).setUint32(13, iat);
+      p[17] = days; p[18] = rb;
+      const sig = new Uint8Array(await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, privKey, p));
+      const all = new Uint8Array(83); all.set(p, 0); all.set(sig, 19);
+      const code = 'QT1-' + b32enc(all).match(/.{1,5}/g).join('-');
+      $('codeOut').value = code;
+      say('makeMsg', 'Đã tạo mã. Gửi mã này cho người dùng.', true);
+      addLog({ t: Date.now(), label: $('labelInput').value.trim(), dev: any ? '(mọi thiết bị)' : devId, days, rb, id: hex(p.slice(1, 7)), iat });
+    } catch (e) { say('makeMsg', 'Lỗi: ' + e.message, false); }
+  });
+  $('copyCode').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText($('codeOut').value); say('makeMsg', 'Đã sao chép.', true); } catch (_) { $('codeOut').select(); document.execCommand('copy'); }
+  });
+
+  // ---- 4. Kiểm tra ----
+  $('chkBtn').addEventListener('click', async () => {
+    try {
+      if (!pubJwk) return say('chkOut', 'Hãy mở khóa trước (cần khóa công khai trong file khóa).', false);
+      const clean = $('chkIn').value.toUpperCase().replace(/^\s*QT1[\s-]*/, '').replace(/[^A-Z2-7]/g, '');
+      if (clean.length !== 133) return say('chkOut', 'Mã không đúng định dạng.', false);
+      const b = b32dec(clean), p = b.slice(0, 19), sig = b.slice(19);
+      const key = await crypto.subtle.importKey('jwk', pubJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
+      const ok = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, sig, p);
+      const dv = new DataView(p.buffer, p.byteOffset, 19);
+      const iat = dv.getUint32(13);
+      const wildcard = p.slice(7, 13).every((x) => x === 0);
+      say('chkOut', (ok ? 'CHỮ KÝ HỢP LỆ' : 'CHỮ KÝ SAI') + ` | ID ${hex(p.slice(1, 7))} | ${wildcard ? 'mọi thiết bị' : 'gắn thiết bị'} | cấp ${fmtDateTime(iat * 1000)} | ${p[17]} ngày | nhập trước ${fmtDate((iat + p[18] * 86400) * 1000)}`, ok);
+    } catch (e) { say('chkOut', 'Lỗi: ' + e.message, false); }
+  });
+
+  // ---- 5. Nhật ký ----
+  const LOG = 'qt_admin_log';
+  const readLog = () => { try { return JSON.parse(localStorage.getItem(LOG) || '[]'); } catch (_) { return []; } };
+  function addLog(e) { const l = readLog(); l.push(e); localStorage.setItem(LOG, JSON.stringify(l)); renderLog(); }
+  function renderLog() {
+    const tb = document.querySelector('#logTable tbody');
+    tb.textContent = '';
+    for (const e of readLog().slice().reverse()) {
+      const tr = document.createElement('tr');
+      for (const v of [fmtDateTime(e.t), e.label, e.dev, e.days, fmtDate((e.iat + e.rb * 86400) * 1000), e.id]) {
+        const td = document.createElement('td'); td.textContent = v; tr.appendChild(td);
+      }
+      tb.appendChild(tr);
+    }
+  }
+  $('csvBtn').addEventListener('click', () => {
+    const rows = [['thoi_diem', 'nguoi_dung', 'thiet_bi', 'so_ngay', 'han_nhap_ma', 'id_ma'], ...readLog().map((e) => [fmtDateTime(e.t), e.label, e.dev, e.days, fmtDate((e.iat + e.rb * 86400) * 1000), e.id])];
+    const csv = rows.map((r) => r.map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['\ufeff' + csv], { type: 'text/csv' })); a.download = 'nhat-ky-ma.csv'; a.click();
+  });
+  $('clearLog').addEventListener('click', () => { if (confirm('Xóa toàn bộ nhật ký?')) { localStorage.removeItem(LOG); renderLog(); } });
+  renderLog();
+
+
+// Bộ làm rối mã JS tối giản, tự viết, không phụ thuộc thư viện ngoài.
+// Nhận biết đúng: chuỗi ' " , template `...${expr}...`, comment //  /* */ , và literal regex /.../
+// để KHÔNG phá hỏng cú pháp khi xóa comment / ẩn chuỗi.
+// Bộ làm rối mã JS tối giản, tự viết, không phụ thuộc thư viện ngoài.
+// Nhận biết đúng: chuỗi ' " , template `...${expr}...`, comment //  /* */ , và literal regex /.../
+// để KHÔNG phá hỏng cú pháp khi xóa comment / ẩn chuỗi.
+const KEYWORDS_BEFORE_REGEX = new Set([
+  'return','typeof','delete','throw','new','in','of','instanceof','void','yield','await',
+  'case','do','else','if','while','for','switch','break','continue','function','var','let','const'
+]);
+const PUNCT_VALUE_END = new Set([')',']']); // sau các ký tự này, "/" là phép chia
+
+function isIdentChar(c) { return /[A-Za-z0-9_$]/.test(c); }
+
+// Tokenize: trả về mảng { type: 'code'|'comment'|'string'|'template', text, parts? }
+// parts (chỉ với template): mảng xen kẽ { str: '...' } (đoạn tĩnh) và { expr: '...' } (biểu thức ${...})
+function tokenize(src) {
+  const toks = [];
+  let i = 0, n = src.length;
+  let lastSig = 'start'; // 'value' | 'other' | 'start' | từ khóa đặc biệt
+
+  function readEscapable(quote) {
+    const start = i; i++; // bỏ qua ký tự mở
+    while (i < n) {
+      if (src[i] === '\\') { i += 2; continue; }
+      if (src[i] === quote) { i++; break; }
+      if (quote !== '`' && (src[i] === '\n')) throw new Error('Chuỗi không đóng ở vị trí ' + start);
+      i++;
+    }
+    return src.slice(start, i);
+  }
+
+  function readRegex() {
+    const start = i; i++; // bỏ "/"
+    let inClass = false;
+    while (i < n) {
+      const c = src[i];
+      if (c === '\\') { i += 2; continue; }
+      if (c === '[') { inClass = true; i++; continue; }
+      if (c === ']') { inClass = false; i++; continue; }
+      if (c === '/' && !inClass) { i++; break; }
+      if (c === '\n') throw new Error('Regex literal không đóng ở vị trí ' + start);
+      i++;
+    }
+    while (i < n && /[a-z]/i.test(src[i])) i++; // flags
+    return src.slice(start, i);
+  }
+
+  // Đọc nội dung template bắt đầu từ sau dấu ` (đã consume) cho tới ` (không escape) hoặc ${
+  // Trả về mảng parts và vị trí kết thúc (đã bao gồm dấu ` đóng).
+  function readTemplate() {
+    const parts = [];
+    let buf = '';
+    while (i < n) {
+      const c = src[i];
+      if (c === '\\') { buf += src.slice(i, i + 2); i += 2; continue; }
+      if (c === '`') { parts.push({ str: buf }); i++; return parts; }
+      if (c === '$' && src[i + 1] === '{') {
+        parts.push({ str: buf }); buf = '';
+        i += 2;
+        const exprStart = i;
+        let depth = 1;
+        // quét biểu thức, nhận diện chuỗi/template/comment/regex lồng bên trong để đếm { } đúng
+        let localLastSig = 'other';
+        while (i < n && depth > 0) {
+          const ch = src[i];
+          if (ch === '{') { depth++; i++; localLastSig = 'other'; continue; }
+          if (ch === '}') { depth--; if (depth === 0) break; i++; localLastSig = 'other'; continue; }
+          if (ch === '"' || ch === "'") { readEscapable(ch); localLastSig = 'value'; continue; }
+          if (ch === '`') { i++; readTemplate(); localLastSig = 'value'; continue; }
+          if (ch === '/' && src[i + 1] === '/') { while (i < n && src[i] !== '\n') i++; continue; }
+          if (ch === '/' && src[i + 1] === '*') { i += 2; while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2; continue; }
+          if (ch === '/' && localLastSig !== 'value') { readRegex(); localLastSig = 'value'; continue; }
+          if (isIdentChar(ch)) { let j = i; while (j < n && isIdentChar(src[j])) j++; i = j; localLastSig = 'value'; continue; }
+          if (/\s/.test(ch)) { i++; continue; }
+          localLastSig = PUNCT_VALUE_END.has(ch) ? 'value' : 'other';
+          i++;
+        }
+        const exprText = src.slice(exprStart, i);
+        i++; // bỏ qua "}"
+        parts.push({ expr: exprText });
+        continue;
+      }
+      buf += c; i++;
+    }
+    throw new Error('Template literal không đóng');
+  }
+
+  while (i < n) {
+    const c = src[i];
+    if (c === '/' && src[i + 1] === '/') {
+      const start = i; while (i < n && src[i] !== '\n') i++;
+      toks.push({ type: 'comment', text: src.slice(start, i) });
+      continue;
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      const start = i; i += 2; while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++; i += 2;
+      toks.push({ type: 'comment', text: src.slice(start, i) });
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const start = i; const raw = readEscapable(c);
+      toks.push({ type: 'string', text: raw, quote: c });
+      lastSig = 'value';
+      continue;
+    }
+    if (c === '`') {
+      i++; const parts = readTemplate();
+      toks.push({ type: 'template', parts });
+      lastSig = 'value';
+      continue;
+    }
+    if (c === '/') {
+      if (lastSig === 'value') { toks.push({ type: 'code', text: '/' }); i++; lastSig = 'other'; continue; }
+      const raw = readRegex();
+      toks.push({ type: 'code', text: raw });
+      lastSig = 'value';
+      continue;
+    }
+    if (isIdentChar(c)) {
+      let j = i; while (j < n && isIdentChar(src[j])) j++;
+      const word = src.slice(i, j);
+      toks.push({ type: 'code', text: word });
+      lastSig = KEYWORDS_BEFORE_REGEX.has(word) ? 'other' : 'value';
+      i = j;
+      continue;
+    }
+    // ký tự đơn (toán tử, dấu câu, khoảng trắng)
+    toks.push({ type: 'code', text: c });
+    if (!/\s/.test(c)) lastSig = PUNCT_VALUE_END.has(c) ? 'value' : 'other';
+    i++;
+  }
+  return toks;
+}
+
+// ---- Minify phần "code": gộp khoảng trắng liên tiếp thành 1, bỏ dòng trắng ----
+function minifyCode(text) {
+  return text.replace(/[ \t]+/g, ' ').replace(/\n[ \t]*\n+/g, '\n').replace(/^[ \t]+/gm, '');
+}
+
+function strToJsLiteral(s, quote) {
+  // trả lại literal gốc (đã có dấu nháy) không đổi -> dùng khi KHÔNG ẩn chuỗi này
+  return quote + s.slice(1, -1) + quote;
+}
+
+function isWs(t) { return t.type === 'code' && /^\s$/.test(t.text); }
+function prevSig(toks, i) { for (let k = i - 1; k >= 0; k--) { if (toks[k].type === 'comment' || isWs(toks[k])) continue; return toks[k]; } return null; }
+function nextSig(toks, i) { for (let k = i + 1; k < toks.length; k++) { if (toks[k].type === 'comment' || isWs(toks[k])) continue; return toks[k]; } return null; }
+// Chuỗi là KEY của object literal ("x": y hoặc {"x": y) thì giữ nguyên, không ẩn
+// (vì _Q(i): y không phải cú pháp hợp lệ cho property key; dùng [_Q(i)]: y cũng được nhưng không cần thiết, ít giá trị).
+function isObjectKey(toks, i) {
+  const p = prevSig(toks, i), nx = nextSig(toks, i);
+  if (!nx || nx.type !== 'code' || nx.text !== ':') return false;
+  return p && p.type === 'code' && (p.text === '{' || p.text === ',');
+}
+
+function buildObfuscated(src, opts) {
+  const toks = tokenize(src);
+  const table = []; // mảng chuỗi tiếng Việt/UTF-8 đã gộp, mã hoá base64(xor)
+  const key = opts.key; // số 1..255
+  function enc(s) {
+    const bytes = new TextEncoder().encode(s);
+    const out = new Uint8Array(bytes.length);
+    for (let k = 0; k < bytes.length; k++) out[k] = bytes[k] ^ key;
+    let bin = ''; for (const b of out) bin += String.fromCharCode(b);
+    return btoa(bin);
+  }
+  function addStr(s) {
+    if (s === '') return null;
+    const idx = table.length;
+    table.push(enc(s));
+    return idx;
+  }
+  let out = '';
+  for (let ti = 0; ti < toks.length; ti++) {
+    const t = toks[ti];
+    if (t.type === 'comment') { continue; } // bỏ hết comment
+    if (t.type === 'code') { out += t.text; continue; }
+    if (t.type === 'string') {
+      if (isObjectKey(toks, ti)) { out += t.text; continue; }
+      const raw = t.text.slice(1, -1);
+      let real;
+      try { real = JSON.parse(t.quote === "'" ? '"' + raw.replace(/\\'/g, "'").replace(/"/g, '\\"') + '"' : t.text); }
+      catch (_) { out += t.text; continue; } // không parse được (hiếm) -> giữ nguyên, an toàn hơn là làm hỏng
+      if (real.length < opts.minLen) { out += t.text; continue; }
+      const idx = addStr(real);
+      out += `_Q(${idx})`;
+      continue;
+    }
+    if (t.type === 'template') {
+      const segs = t.parts.map((p) => {
+        if ('expr' in p) return '(' + p.expr + ')';
+        if (p.str === '') return null;
+        const idx = addStr(p.str);
+        return `_Q(${idx})`;
+      }).filter((x) => x !== null);
+      out += segs.length ? '(' + segs.join('+') + ')' : "''";
+      continue;
+    }
+  }
+  out = minifyCode(out);
+  // Hậu tố riêng cho mỗi file để nhiều file obfuscate có thể cùng tồn tại trong 1 global scope (vd. options.html nạp 2 script)
+  // mà không đụng tên biến top-level (let/const ở nhiều thẻ <script> cùng trang dùng chung 1 lexical scope toàn cục).
+  const ns = '_' + (opts.ns || 'x');
+  const T = '_T' + ns, K = '_K' + ns, Q = '_Q' + ns;
+  out = out.split('_Q(').join(Q + '(');
+  const header = `// (Mã đã được rút gọn để triển khai nội bộ; bản gốc dễ đọc do tổ chức lưu giữ riêng.)\n` +
+    `const ${T}=${JSON.stringify(table)};const ${K}=${key};` +
+    `function ${Q}(i){const b=atob(${T}[i]);const u=new Uint8Array(b.length);for(let k=0;k<b.length;k++)u[k]=(b.charCodeAt(k)^${K});return new TextDecoder().decode(u);}\n`;
+  return header + out;
+}
+
+// ZIP "store" (không nén) viết tay bằng JS thuần, đủ dùng để trình duyệt tạo file .zip tải về.
+function crc32(buf) {
+  let c, crc = 0xFFFFFFFF;
+  for (let i = 0; i < buf.length; i++) {
+    c = (crc ^ buf[i]) & 0xFF;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    crc = (crc >>> 8) ^ c;
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+function u16(v) { return [v & 255, (v >> 8) & 255]; }
+function u32(v) { return [v & 255, (v >> 8) & 255, (v >> 16) & 255, (v >>> 24) & 255]; }
+function dosTime() { const d = new Date(); return u16(((d.getHours() & 31) << 11) | ((d.getMinutes() & 63) << 5) | ((d.getSeconds() >> 1) & 31)); }
+function dosDate() { const d = new Date(); return u16((((d.getFullYear() - 1980) & 127) << 9) | (((d.getMonth() + 1) & 15) << 5) | (d.getDate() & 31)); }
+
+// files: [{ name: 'quiz-tutor-ai/manifest.json', data: Uint8Array }]
+function buildZip(files) {
+  const chunks = []; const central = []; let offset = 0;
+  const time = dosTime(), date = dosDate();
+  for (const f of files) {
+    const nameBytes = new TextEncoder().encode(f.name);
+    const crc = crc32(f.data);
+    const local = new Uint8Array([
+      0x50, 0x4B, 3, 4, 20, 0, 0, 0, 0, 0, ...time, ...date,
+      ...u32(crc), ...u32(f.data.length), ...u32(f.data.length), ...u16(nameBytes.length), ...u16(0)
+    ]);
+    chunks.push(local, nameBytes, f.data);
+    central.push({ nameBytes, crc, size: f.data.length, offset });
+    offset += local.length + nameBytes.length + f.data.length;
+  }
+  const centralStart = offset;
+  for (const e of central) {
+    const rec = new Uint8Array([
+      0x50, 0x4B, 1, 2, 20, 0, 20, 0, 0, 0, 0, 0, ...time, ...date,
+      ...u32(e.crc), ...u32(e.size), ...u32(e.size), ...u16(e.nameBytes.length), ...u16(0), ...u16(0), ...u16(0), ...u16(0),
+      ...u32(0), ...u32(e.offset)
+    ]);
+    chunks.push(rec, e.nameBytes);
+    offset += rec.length + e.nameBytes.length;
+  }
+  const centralSize = offset - centralStart;
+  const end = new Uint8Array([
+    0x50, 0x4B, 5, 6, 0, 0, 0, 0, ...u16(central.length), ...u16(central.length),
+    ...u32(centralSize), ...u32(centralStart), ...u16(0)
+  ]);
+  chunks.push(end);
+  let total = 0; for (const c of chunks) total += c.length;
+  const out = new Uint8Array(total); let p = 0;
+  for (const c of chunks) { out.set(c, p); p += c.length; }
+  return out;
+}
+
+})();
+</script>
+</body>
+</html>
